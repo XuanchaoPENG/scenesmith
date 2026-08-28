@@ -1,71 +1,69 @@
-# SceneSmith 场景生成、扩展功能与结果展示指南
+# SceneSmith Desktop 场景生成指南
 
-本文档针对当前仓库 `/home/dex/桌面/scenesmith` 的实际配置。当前采用的是基础远程模式：LLM、图像生成、图像分割和 3D 几何生成均通过 API 调用，不在本机安装或运行 SAM3、SAM3D 等模型。
+本文档以当前仓库中的 `desktop_scene_generation` 实现为准。Desktop 模式用于生成“单张桌子 + 主桌面上的小物体”，它是一条独立的两阶段流水线，不会先生成完整房间，也不会执行 floor plan、墙面、顶面或普通家具布局阶段。
 
-## 1. 当前已经能做什么
+如果目标是完整室内或多房间住宅，请继续使用默认的 `indoor_scene_generation`；本文主要说明 desktop 模式。
 
-当前链路已经实际生成过一个完整的桌面场景，工作流如下：
+## 1. 当前工作流概览
 
 ```text
-文本提示词（可选：顶层参考图片）
-  → VLM 将参考图解析为对象、朝向、支撑和空间关系约束
-  → LLM 设计房间和平面布局
-  → 家具/墙饰/顶饰/桌面小物规划
-  → 远程图像生成 API
-  → 远程图像分割 API
-  → 远程几何生成 API
-  → 本地 GLB/SDF、碰撞体和物理属性处理
-  → 物体摆放、堆叠、碰撞投影和物理沉降
-  → Blender、Drake DMD、JSON 和 SceneEval 输出
+文本 prompt（可选：一张参考图）
+  → 参考图 VLM 分析，生成结构化约束并追加到 prompt
+  → 创建 4 m × 4 m 的无墙物理工作室和隐藏支撑地面
+  → LLM 将 prompt 拆成桌子规格、必选/可选物体、风格和布局约束
+  → 生成并在原点放置唯一一张桌子
+  → 从桌子网格提取支撑面，只保留最高区域内最大的近水平主桌面
+  → Planner / Designer / Critic 生成、摆放并多视图检查桌面小物
+  → 单桌局部投影与物理仿真
+  → 全场景碰撞投影与物理沉降，移除掉落小物
+  → 硬性结构校验
+  → 保存 GLB/SDF、状态 JSON、Drake DMD、Blender 和校验报告
 ```
 
-已经使用并验证的能力包括：
+### 1.1 与 indoor 模式的关键区别
 
-- 单房间平面、墙、门窗和默认材质生成。
-- 桌椅等大型家具生成和摆放。
-- 墙面装饰与天花板灯具生成。
-- 盘子、碗、书和瓶子等桌面小物生成。
-- 参考图的结构化解析、文本约束注入，以及 Critic 多视图对比。
-- 支撑面识别、排列、堆叠和碰撞检查。
-- 最终物理投影及约 15 秒的物理沉降。
-- Blender、Drake Directives、状态 JSON 和 SceneEval 导出。
+| 项目 | Desktop | Indoor |
+|---|---|---|
+| 实验选择 | `experiment=desktop_scene_generation` | 默认 `experiment=indoor_scene_generation` |
+| 场景范围 | 一张桌子及其桌面物体 | 单房间或多房间 |
+| 主流程 | 桌子 → 桌面小物 | 平面 → 家具 → 墙面/顶面 → 小物 |
+| 墙、门窗、椅子等 | 不生成 | 按 prompt 生成 |
+| 可用支撑面 | 唯一主桌面 | 多家具、多支撑面 |
+| 最终输出 | `scene_states/final_desktop_scene/` | 房间状态及 `combined_house/` |
+| SceneEval 导出 | 默认关闭 | 默认开启 |
+| 阶段续跑 | 当前未接入 | 支持检查点分支和续跑 |
 
-## 2. 第一次运行前的准备
+无墙工作室仍有一个供 Drake 物理计算使用的地面，但地面属于 `room_geometry`，不计入 desktop 的场景对象。最终结构校验只允许一张目标桌和桌面小物。
+
+## 2. 运行前准备
 
 ### 2.1 激活环境
 
 ```bash
 cd /home/dex/桌面/scenesmith
 conda activate scenesmith
-```
-
-快速确认关键依赖：
-
-```bash
 python -c "import bpy, pydrake; print('SceneSmith environment OK')"
 ```
 
-如果以后需要重建基础环境，可使用 Python 3.11 创建环境，然后在仓库根目录执行 `pip install -e .`。当前环境已经配置完成，不需要重复安装。
+若需重建环境，请使用 Python 3.11，并在仓库根目录执行 `pip install -e .`。
 
 ### 2.2 配置 `.env`
 
-仓库根目录的 `main.py` 会自动读取同目录下的 `.env`，不需要手动 `source` 才能运行 SceneSmith。
-
-首次配置时：
+`main.py` 会自动加载仓库根目录的 `.env`：
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-需要填写的主要内容是：
+需要填写：
 
-- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`：兼容 OpenAI Responses API 的 LLM 服务。
-- `SCENE_ENGINE_IMAGE_GENERATION_BASE_URL`：文本生成图片服务，当前对应 zimage。
-- `SCENE_ENGINE_IMAGE_SEGMENTATION_BASE_URL`：图像分割服务。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`：兼容 OpenAI API 的 LLM/VLM 服务。
+- `SCENE_ENGINE_IMAGE_GENERATION_BASE_URL`：文本生成图片服务。
+- `SCENE_ENGINE_IMAGE_SEGMENTATION_BASE_URL`：图片分割服务。
 - `SCENE_ENGINE_GEOMETRY_GENERATION_BASE_URL`：图片/掩码生成 3D 几何服务。
 
-基础远程模式应保留这些设置：
+当前基础远程配置为：
 
 ```dotenv
 SCENESMITH_GEOMETRY_MODE="remote"
@@ -80,11 +78,9 @@ SCENESMITH_OPENAI_API_MODE="chat_completions"
 OPENAI_AGENTS_DISABLE_TRACING="true"
 ```
 
-不要把真实密钥写进本文档、命令历史、日志或 Git。`.env` 已被 Git 忽略，但仍应在提交前执行 `git status` 检查。
+不要把真实密钥写进文档、命令历史、日志或 Git。提交前应检查 `git status`。
 
 ### 2.3 检查远程服务
-
-需要手动检查服务时，可以临时导出 `.env` 变量：
 
 ```bash
 set -a
@@ -96,438 +92,290 @@ curl -fsS "${SCENE_ENGINE_IMAGE_SEGMENTATION_BASE_URL}${SCENE_ENGINE_IMAGE_SEGME
 curl -fsS "${SCENE_ENGINE_GEOMETRY_GENERATION_BASE_URL}${SCENE_ENGINE_GEOMETRY_GENERATION_HEALTH_PATH}"
 ```
 
-三个命令都应正常返回。如果几何服务较慢，只要健康检查正常，不应因为单次生成耗时较长而立即中止。
+几何生成可能耗时数分钟；健康检查正常时，不要因单次请求较慢而过早中止。
 
-## 3. 开始生成场景
+## 3. 生成 Desktop 场景
 
 ### 3.1 最小命令
 
-当前 LLM 服务使用 Chat Completions 的原生工具调用和 `json_object` 结构化输出。Agent 的 planner、designer 和 critic 共用同一组 `OPENAI_*` 配置，执行顺序保持原仓库逻辑，基础命令不覆盖 `max_critique_rounds`：
-
-```bash
-python main.py \
-  +name=my_first_scene \
-  floor_plan_agent.mode=room \
-  'experiment.prompts=["A simple dining room with one rectangular wooden table, four chairs, ordinary walls, and a few small objects on the table."]' \
-  experiment.num_workers=1
-```
-
-不要把 `max_critique_rounds=0` 当成“跳过 planner/critic”的开关；本仓库现在保留原始执行语义，即 planner 和最终评价流程仍由原 agent 工作流决定。
-
-`+name` 只是运行名称；实际输出仍按日期和时间写入 `outputs/YYYY-MM-DD/HH-MM-SS/`。最新一次运行也可通过 `outputs/latest-run` 访问。
-
-### 3.2 只生成桌面场景
-
-SceneSmith 仍然需要一个房间作为容器，因此“桌面场景”推荐理解成：生成一个简单单房间，只放一张主桌，并把重点物体放到这张桌上。
-
-提示词应明确包含：
-
-1. 房间类型和主桌数量。
-2. 桌面物体的精确清单。
-3. 从下到上的支撑顺序。
-4. 朝向、颜色、尺寸关系和接触关系。
-5. 不允许出现的额外物体。
-
-示例：
+必须显式选择 desktop 实验：
 
 ```bash
 python main.py \
   +name=desktop_stack \
-  floor_plan_agent.mode=room \
-  'experiment.prompts=["A simple tabletop still-life scene in a modest dining room. Include exactly one plain rectangular dining table as the main furniture. At the center of the tabletop, create one vertical stack from bottom to top: a large flat round white dinner plate; a smooth white ceramic bowl placed upside down with its wide rim touching the plate and its rounded base facing upward; a thick closed tan-brown hardcover book lying flat on the inverted bowl; and a classic clear cola bottle standing upright on the book, filled with dark cola and closed by a red metal cap. Every layer must physically touch the layer below. Keep the stack centered and stable. Do not add any other objects on this table."]' \
+  experiment=desktop_scene_generation \
+  'experiment.prompts=["Create a sparse tabletop still life: a white plate on the table, an upside-down white bowl on the plate, a closed brown book on the bowl, and one sealed glass cola bottle standing on the book. Preserve this exact bottom-to-top stack and add no other objects."]' \
   experiment.num_workers=1
 ```
 
-提示词是语义约束，不是严格的机械约束。生成后必须检查朝向和接触关系。例如，“碗倒扣”虽然写进提示词，资产仍可能以默认正向姿态被堆叠；此类错误需要重新生成资产、显式修改姿态，或者给堆叠工具增加方向约束，不能只根据对象名称判断正确。
+`+name` 是运行名称；Hydra 仍会把结果写入 `outputs/YYYY-MM-DD/HH-MM-SS/`，并更新 `outputs/latest-run` 软链接。
 
-### 3.3 使用顶层参考图片
+Desktop 模式不需要设置 `floor_plan_agent.mode`。即使传入该参数，也不会执行平面生成。
 
-可以在启动时传入一张参考图。系统首先用当前多模态 LLM 提取结构化约束，再把它们追加到原场景提示词；每轮 Critic 还会把该图作为目标，与 `observe_scene` 生成的当前场景多视图对比。
+### 3.2 Prompt 写法
 
-使用当前桌面参考图：
+建议明确给出：
+
+1. 桌子的外观和尺寸需求；若不指定，则使用默认的浅色木质长方桌，默认尺寸约为 `1.4 × 0.8 × 0.75 m`。
+2. 必选物体及精确数量。
+3. 可选物体，或者明确写“不要添加其他物体”。
+4. 支撑、堆叠、接触、朝向和从下到上的顺序。
+5. 相对尺寸、颜色、材质、桌面位置和希望保留的空白区域。
+
+例如：
+
+```text
+Use exactly one rectangular light-wood table. On its main tabletop include exactly
+four items and no extras. At the center, stack from bottom to top: one large white
+dinner plate; one white ceramic bowl upside down with its rim touching the plate;
+one closed tan hardcover book lying flat; and one sealed clear cola bottle standing
+upright. Keep every adjacent layer in contact and keep the rest of the table empty.
+```
+
+Desktop 会把 prompt 解析为桌子描述、桌子尺寸、必选/可选物体、风格和布局说明。解析失败会重试，全部失败后使用默认桌子并把原 prompt 作为必选物体要求。
+
+默认 `atomic_asset_requests=true` 会关闭小物资产路由器的复合拆分，尽量保持“一次语义请求对应一个资产”。例如密封可乐瓶及瓶内可见液体应被视为一个资产，而不是瓶子和液体两个场景物体。堆叠工具仍可能把多个成员组合成一个复合场景对象，校验报告会通过 `num_members` 统计其真实成员数。
+
+Prompt 和参考图提供的是语义约束，不保证精确几何重建。尤其应在最终 Blender 和多视图渲染中人工检查“倒扣、侧放、开口方向、层间接触”等姿态。
+
+### 3.3 使用参考图
 
 ```bash
 python main.py \
-  +name=reference_desktop \
-  floor_plan_agent.mode=room \
-  'experiment.reference_image_path=/home/dex/下载/ChatGPT Image 2026年8月21日 17_37_17.png' \
-  'experiment.prompts=["Reconstruct a simple, physically stable tabletop scene matching the reference image. Use one plain table in a modest room and do not add unrelated tabletop objects."]' \
+  +name=desktop_reference \
+  experiment=desktop_scene_generation \
+  'experiment.reference_image_path=/absolute/path/to/reference.png' \
+  'experiment.prompts=["Reconstruct the tabletop objects and their support relationships. Use one plain table and add no unrelated objects."]' \
   experiment.num_workers=1
 ```
 
-这不是从单张 RGB 图直接恢复精确几何，仍然使用 SceneSmith 原有的“文本规划 → 资产生成 → 摆放 → 物理处理”管线。图片额外提供语义、外观、朝向、计数、支撑和空间关系约束；Critic 做的是语义和结构对比，而非逐像素匹配。
+参考图只分析一次：VLM 会抽取对象、数量、外观、朝向、支撑与空间关系，保存结构化结果，并把文本约束追加到每个 prompt。Manipuland Critic 还会把原图作为视觉目标与当前多视图观察进行比较。
 
-一次运行传入多个 prompt 时，当前的同一张参考图会应用于每个 prompt。若每个场景需要不同图片，应分开启动多次实验。只想用图片强化生成提示词、不想在 Critic 中重复传图时，增加：
+如只想把参考图转成 prompt 约束，不想在 Critic 中重复附图：
 
 ```bash
 experiment.reference_image.compare_during_critique=false
 ```
 
-### 3.4 单房间与多房间
+同一次运行有多个 prompt 时，同一张参考图会作用于全部 prompt。不同场景需要不同参考图时，应分开运行。
 
-单房间：
+### 3.4 CSV 与并行生成
 
-```bash
-python main.py +name=one_room floor_plan_agent.mode=room \
-  'experiment.prompts=["A compact home office with one desk and one chair."]'
-```
-
-多房间住宅：
-
-```bash
-python main.py +name=whole_house floor_plan_agent.mode=house \
-  'experiment.prompts=["A small apartment with a living room, bedroom, kitchen, and bathroom."]'
-```
-
-多房间会生成更多资产，API 调用数量、耗时和失败概率都会明显增加。建议先用单房间验证提示词和服务，再切换到 `house`。
-
-### 3.5 批量生成
-
-可以直接传入多个提示词，也可以使用 CSV。CSV 格式如下：
+CSV 必须包含 `scene_index,prompt`：
 
 ```csv
 scene_index,prompt
-0,"A compact dining room with one table"
-1,"A simple home office with one desk"
+0,"A writing desk with one laptop, one notebook, and one pen"
+3,"A dining table with one plate, one cup, and no other objects"
 ```
 
-运行：
-
 ```bash
-python main.py +name=batch_scenes \
+python main.py \
+  +name=desktop_batch \
+  experiment=desktop_scene_generation \
   experiment.csv_path=/absolute/path/to/prompts.csv \
   experiment.num_workers=1
 ```
 
-远程服务确认能够承受并发后，可以把 `experiment.num_workers` 调大。调试阶段建议保持为 `1`，避免多个 Blender 进程、端口和 API 请求交织在一起。
+CSV 会覆盖 YAML 中的 `prompts`，目录编号沿用 `scene_index`，例如生成 `scene_000/` 和 `scene_003/`。确认 API、GPU、Blender 端口和内存能够承受后，可提高 `num_workers`；每个场景在隔离进程中执行，一项失败不会让其他正在执行的场景立即崩溃，但任务结束时会汇总失败并抛出错误。
 
-## 4. 生成阶段及断点续跑
+## 4. 两阶段内部流程
 
-流水线的真实顺序是：
+### 4.1 阶段一：唯一桌子
 
-| 阶段 | 配置值 | 主要产物 |
-|---|---|---|
-| 平面 | `floor_plan` | 房间、墙、地板、门窗 |
-| 家具 | `furniture` | 桌椅、床、柜子等大型物体 |
-| 墙面 | `wall_mounted` | 画、镜子、时钟、壁架等 |
-| 顶面 | `ceiling_mounted` | 吊灯、吸顶灯、风扇等 |
-| 小物 | `manipuland` | 桌面、柜面和容器中的小物体 |
+1. 创建默认 `4 × 4 m`、无墙、带隐藏地面的 studio。
+2. LLM 将场景 prompt 解析为 `DesktopSceneSpec`。
+3. 资产链路执行图片生成、分割、3D 几何生成和本地 GLB/SDF/碰撞体处理。
+4. 如果后端意外返回多个桌子候选，只保留占地面积最大的一个。
+5. 将桌子固定在世界原点，并写入 desktop 标记及小物约束元数据。
+6. 保存 `scene_states/desktop_after_table/` 状态快照。该快照目前不能直接用于续跑。
 
-只运行到家具阶段：
+### 4.2 阶段二：主桌面小物
 
-```bash
-python main.py +name=base_room \
-  experiment.pipeline.stop_stage=furniture \
-  'experiment.prompts=["A simple dining room with one table and four chairs."]'
-```
+1. 只选择带 `desktop_target` 标记的桌子；数量不是 1 会报错。
+2. 从桌子网格提取全部支撑面。
+3. 过滤面积小于 `0.25 m²` 或倾角大于 `5°` 的表面。
+4. 在最高表面向下 `0.05 m` 的候选带内选择面积最大的表面，并锁定为唯一主桌面。
+5. 关闭上下文家具选择，不暴露地面、架子、抽屉或次级表面。
+6. Planner 调度 Designer 生成/排列/堆叠物体；Critic 通过多视图和状态工具检查结果并给出迭代意见。
+7. 对该桌的局部子问题执行碰撞投影和物理仿真；默认局部仿真为 5 秒。
 
-从已有实验分支，只重新生成小物体：
+### 4.3 最终物理处理与校验
 
-```bash
-python main.py +name=new_tabletop_objects \
-  experiment.pipeline.start_stage=manipuland \
-  experiment.pipeline.resume_from_path=/home/dex/桌面/scenesmith/outputs/YYYY-MM-DD/HH-MM-SS
-```
+当 `experiment.projection.enabled=true` 且 `experiment.projection.final.enabled=true` 时：
 
-`resume_from_path` 会把所需检查点复制到新实验目录，不会覆盖原实验。这是修改桌面摆设时最值得使用的功能，因为不需要重新生成房间、桌椅、墙饰和灯具。
+- 桌子被焊接固定，小物参与碰撞投影。
+- 可按配置执行最终物理沉降；默认仿真 15 秒。
+- 桌子不会因掉落检测被删除；掉到地面或明显下落的小物默认会被移除。
+- 投影未收敛只记录警告，随后仍会执行结构校验。
 
-## 5. 输入和输出
+`desktop_validation.json` 检查以下硬性条件：
 
-### 5.1 输入
+- 恰好一个带 `desktop_target` 标记的桌子，且场景中只有这一件家具。
+- `scene.objects` 中没有墙、墙饰、顶饰或地面对象。
+- 已锁定唯一 `desktop_surface_id`。
+- 至少存在一个桌面小物。
+- 每个小物都有支撑面放置信息，且父表面就是锁定的主桌面。
 
-主要输入有四类：
+校验失败时报告仍会先写盘，然后该场景以 `RuntimeError` 结束。当前校验不验证物体语义是否与 prompt 完全一致，也不验证精确朝向、数量、层间接触或美观程度；这些仍需查看渲染和状态文件。
 
-- `.env`：模型/API 地址、密钥、超时、重试次数和功能开关。
-- Hydra 参数：房间模式、流水线阶段、并发数和各 agent 配置。
-- 场景提示词：直接通过 `experiment.prompts` 或 CSV 输入。
-- 可选参考图：通过 `experiment.reference_image_path` 传入单张 PNG/JPEG/WebP 等 Pillow 可读图片。
+## 5. 配置项
 
-参考图会被自动转写为结构化场景约束，不需要用户手工描述图片。为了指定房间范围、禁止项或图中不可见的需求，仍应同时提供一句简短文本 prompt。
+主要 desktop 配置位于 `configurations/experiment/desktop_scene_generation.yaml`：
 
-### 5.2 输出目录
+| 配置 | 默认值 | 作用 |
+|---|---:|---|
+| `desktop.studio.width_m` / `length_m` | `4.0` / `4.0` | 物理工作室尺寸 |
+| `desktop.studio.floor_thickness_m` | `0.1` | 隐藏支撑地面厚度 |
+| `desktop.table.default_dimensions_m` | `[1.4, 0.8, 0.75]` | prompt 未给尺寸时的桌子尺寸 |
+| `desktop.prompt_analysis.max_retries` | `3` | prompt 结构化解析重试次数 |
+| `desktop.target_surface.min_area_m2` | `0.25` | 主桌面最小面积 |
+| `desktop.target_surface.max_tilt_degrees` | `5.0` | 主桌面最大倾角 |
+| `desktop.target_surface.top_height_tolerance_m` | `0.05` | 最高候选带厚度 |
+| `desktop.objects.atomic_asset_requests` | `true` | 禁用小物复合拆分路由器 |
+| `experiment.projection.*` | 见基础配置 | 最终投影和物理沉降 |
+| `manipuland_agent.per_furniture_postprocessing.*` | 见小物配置 | 单桌局部投影和仿真 |
 
-一次完整运行的核心结构如下：
+配置文件中 `desktop.target_surface.policy`、`allow_optional_objects`、`max_count`、`open_area_ratio`、`allow_floor_placement` 以及 `desktop.validation.*` 目前只是预留字段，尚未被 desktop 执行代码读取。不要把它们当作硬约束；精确数量应写进 prompt，并以最终报告和渲染为准。
+
+同样，desktop 的 `pipeline.start_stage=desktop_table`、`stop_stage=desktop_objects`、`resume_from_path` 当前仅为共享启动代码保留，`_generate_single_scene` 每次都会完整运行桌子和小物两个阶段。当前不支持通过这些字段跳过阶段或从 desktop 检查点续跑。
+
+`pipeline.parallel_rooms` 对 desktop 没有实际并行对象，应保持 `false`。`sceneeval_export.enabled` 虽然继承自共享配置且在 desktop YAML 中默认为 `false`，但当前 desktop 执行函数没有调用 SceneEval exporter；只把它改成 `true` 也不会产生 SceneEval 文件。
+
+## 6. 输出目录
+
+一次成功的 desktop 运行核心结构如下：
 
 ```text
 outputs/YYYY-MM-DD/HH-MM-SS/
 ├── experiment.log
 ├── resolved_config.yaml
-├── reference_conditioning/       # 仅传入参考图时生成
+├── reference_conditioning/                 # 仅使用参考图时
 │   ├── original.<ext>
 │   ├── reference_image.png
 │   ├── reference_scene_spec.json
 │   └── reference_prompt.txt
 └── scene_000/
-    ├── package.xml
-    ├── house_layout.json
-    ├── combined_house/
-    │   ├── house.blend
-    │   ├── house.dmd.yaml
-    │   ├── house_state.json
-    │   └── sceneeval_state.json
-    └── room_<room-name>/
-        ├── generated_assets/
-        ├── scene_renders/
-        └── scene_states/final_scene/
-            ├── scene.blend
-            ├── scene.dmd.yaml
-            ├── scene_state.json
-            └── sceneeval_state.json
+    ├── action_log.json                        # 发生已记录场景操作时
+    ├── scene.log
+    ├── desktop_validation.json
+    ├── studio_geometry/desktop_studio.sdf
+    ├── generated_assets/
+    │   ├── furniture/{images,geometry,sdf,debug}/
+    │   └── manipuland/{images,geometry,sdf,debug}/
+    ├── scene_renders/
+    ├── scene_states/
+    │   ├── desktop_after_table/
+    │   │   ├── scene_state.json
+    │   │   └── scene.dmd.yaml
+    │   ├── desktop_pre_projection/          # 启用最终投影时
+    │   │   ├── scene_state.json
+    │   │   └── scene.dmd.yaml
+    │   └── final_desktop_scene/
+    │       ├── scene_state.json
+    │       ├── scene.dmd.yaml
+    │       ├── scene.blend                   # Blender 导出成功时
+    │       └── bpy_visualization/            # Blender 导出时生成的检查图
+    └── table_<id>_{designer,critic}*.db      # Agent 会话与摘要，文件集可能变化
 ```
 
-各文件用途：
+最重要的文件：
 
 | 文件 | 用途 |
 |---|---|
-| `house.blend` | 最适合在 Blender 中检查外观和制作展示渲染 |
-| `house.dmd.yaml` | SceneSmith 原生 Drake Directives 仿真入口 |
-| `house_state.json` | 对象语义、资产路径、组合关系和生成元数据 |
-| `sceneeval_state.json` | SceneEval 兼容的对象与变换描述 |
-| `resolved_config.yaml` | 本次运行的完整解析后配置，用于复现 |
-| `experiment.log` | 排查 agent、API、资产生成和物理阶段错误 |
-| `reference_scene_spec.json` | VLM 从参考图提取的对象、朝向、支撑和空间关系 |
-| `reference_prompt.txt` | 实际追加到场景 prompt 的参考图约束，便于检查和复现 |
+| `desktop_validation.json` | 结构校验结果、错误、警告和对象计数 |
+| `final_desktop_scene/scene.blend` | Blender 导出成功时的最终视觉检查和展示文件 |
+| `final_desktop_scene/scene.dmd.yaml` | Drake 调试入口，使用绝对 `file://` 资产路径 |
+| `final_desktop_scene/scene_state.json` | 对象语义、变换、组合关系、支撑面和资产路径 |
+| `generated_assets/` | 生成图片、GLB、SDF、碰撞几何和调试图 |
+| `scene_renders/` | Planner/Designer/Critic 的观察图和中间状态 |
+| `resolved_config.yaml` | 本次运行的完整解析配置，用于复现 |
+| `scene.log` / `experiment.log` | 分别排查单场景和实验级错误 |
 
-## 6. 如何查看和展示最终结果
+Desktop 当前不会组装 `combined_house/house.blend`、`house.dmd.yaml` 或 `house_state.json`，也不会默认生成 SceneEval 文件。查看 desktop 结果时不要沿用 indoor 的 `combined_house/` 路径。
 
-### 6.1 Blender 外观展示
+## 7. 查看结果
 
-最终完整场景位于：
-
-```text
-outputs/YYYY-MM-DD/HH-MM-SS/scene_000/combined_house/house.blend
-```
-
-桌面有 Blender 文件关联时可运行：
+### 7.1 Blender
 
 ```bash
-xdg-open outputs/YYYY-MM-DD/HH-MM-SS/scene_000/combined_house/house.blend
+xdg-open outputs/latest-run/scene_000/scene_states/final_desktop_scene/scene.blend
 ```
 
-也可以在 Blender 中使用 `File → Open` 打开。推荐的展示步骤：
+建议检查：
 
-1. 切换到 Material Preview 或 Rendered 模式检查材质。
-2. 添加或调整 Camera，使目标物体位于画面中心。
-3. 使用 Area Light 补光，避免白色物体和浅色背景融在一起。
-4. 在 Eevee 中设置 512 或 1024 分辨率，按 `F12` 渲染。
-5. 使用 `Image → Save As` 保存 PNG。
+- 桌上是否只有要求的物体，数量是否正确。
+- 倒扣、直立、平放等朝向是否正确。
+- 堆叠顺序、层间接触和相对尺寸是否合理。
+- 物体是否因物理沉降发生明显滑移、穿透或掉落。
 
-`scene_renders/` 中的图片主要是 agent 观察和调试图，通常包含标注、包围框或方向箭头，不一定适合作为最终展示图。
+`scene_renders/` 和 `bpy_visualization/` 主要用于 agent 观察与调试，可能包含固定相机或标注，不一定适合直接作为最终展示图。
 
-### 6.2 Drake/Meshcat 交互式仿真查看
+### 7.2 Drake / Meshcat
 
-完整场景中的 URI 使用 `package://scene/`，需要先设置包路径：
+Desktop 的最终 DMD 使用绝对资产路径，一般无需设置 `ROS_PACKAGE_PATH`：
 
 ```bash
-SCENE_DIR=/home/dex/桌面/scenesmith/outputs/YYYY-MM-DD/HH-MM-SS/scene_000
-export ROS_PACKAGE_PATH="${SCENE_DIR}${ROS_PACKAGE_PATH:+:${ROS_PACKAGE_PATH}}"
-
 python -m pydrake.visualization.model_visualizer \
-  "${SCENE_DIR}/combined_house/house.dmd.yaml"
+  outputs/latest-run/scene_000/scene_states/final_desktop_scene/scene.dmd.yaml
 ```
 
-命令会启动 Meshcat，并在浏览器中显示场景。这里更适合检查：
+这里适合检查碰撞几何、对象变换和 Drake 是否能正确解析模型。
 
-- 物体坐标和层级。
-- 碰撞几何与可视几何是否一致。
-- 模型是否能被 Drake 正确解析。
-- 可动关节是否存在以及活动方向是否正确。
-
-如果只看某个房间，也可以加载其 `scene_states/final_scene/scene.dmd.yaml`。该文件使用绝对 `file://` 路径，一般不需要设置 `ROS_PACKAGE_PATH`。
-
-### 6.3 保存物理仿真网页
-
-当前 `experiment.projection.simulation.save_html=false`，因此没有保存 Meshcat HTML。需要调试或离线展示物理沉降时，可运行：
+当前 desktop 只接通了单桌局部仿真的 HTML 保存：
 
 ```bash
-python main.py +name=scene_with_sim_html \
-  experiment.projection.simulation.save_html=true \
-  'experiment.prompts=["A simple room with one table and a cup on the table."]'
+python main.py \
+  +name=desktop_sim_html \
+  experiment=desktop_scene_generation \
+  manipuland_agent.per_furniture_postprocessing.simulation.save_html=true
 ```
 
-这类 HTML 更适合展示仿真过程；Blender PNG/视频更适合展示视觉质量。
+文件会写入 `scene_000/simulation/per_furniture/<table-id>_simulation.html`。`experiment.projection.simulation.save_html` 虽存在于共享配置中，但 desktop 的最终物理调用目前没有传入 HTML 输出路径，因此打开该字段不会保存最终仿真网页。
 
-### 6.4 当前桌面示例
+## 8. 常见问题
 
-已生成示例位于：
+### 选成了完整房间模式
 
-```text
-/home/dex/桌面/scenesmith/outputs/2026-08-27/11-31-53
-```
-
-其中 `combined_house/house.blend` 和 `combined_house/house.dmd.yaml` 是流水线原始输出。由于原始堆叠把碗正放，后来额外生成了：
-
-```text
-room_dining_room/scene_states/final_scene/scene_bowl_inverted.blend
-room_dining_room/scene_states/final_scene/preview_stack_bowl_inverted.png
-combined_house/house_bowl_inverted.blend
-```
-
-这些 `*_bowl_inverted.blend` 是手动修正后的视觉场景；原始 DMD/JSON 尚未同步该手动修改，不能把修正版 Blender 和原始 DMD 当成完全一致的仿真状态。
-
-## 7. 当前没有使用的功能，以及如何启用
-
-| 功能 | 当前状态 | 作用 | 启用前提/方法 |
-|---|---|---|---|
-| 本地 SAM3/SAM3D | 未安装、未使用 | 本地分割和 image-to-3D | 准备模型仓库、权重和足够显存；将几何模式改为 `local`、backend 改为 `sam3d` |
-| 本地 Hunyuan3D | 未使用 | 本地替代 3D 生成后端 | 安装对应依赖和权重，将几何模式改为 `local` 并选择 Hunyuan backend |
-| AmbientCG 材质检索 | 关闭 | 为墙、地面和覆盖物检索 PBR 材质 | 下载材质、准备 embedding，再设置 `SCENESMITH_USE_MATERIALS_RETRIEVAL=true` |
-| 可动关节物体 | 关闭 | 带门、抽屉或关节的柜子等 | 准备 ArtVIP 或 PartNet-Mobility SDF 与 embedding，再设置 `SCENESMITH_ENABLE_ARTICULATED=true` |
-| 薄覆盖物 | 关闭 | 地毯、桌布、餐垫等薄片资产 | 需要材质库或可用的材质生成后端，再设置 `SCENESMITH_ENABLE_THIN_COVERING=true` |
-| HSSD 检索 | 未使用 | 从室内资产库检索现有模型，减少 3D 生成 | 下载 HSSD 和预处理数据，把相应 agent 的 `asset_manager.general_asset_source` 设为 `hssd` |
-| Objaverse/ObjectThor 检索 | 未使用 | 从 Objaverse 子集检索现有模型 | 下载并预处理数据，把相应 agent 的 `asset_manager.general_asset_source` 设为 `objaverse` |
-| 多房间 house | 未使用 | 一次生成多个连通房间 | 设置 `floor_plan_agent.mode=house`；建议先保持单 worker |
-| 多场景/多房间并行 | 未使用 | 提高批量生成吞吐 | 使用 CSV、调高 `experiment.num_workers`，或启用 `experiment.pipeline.parallel_rooms=true`；需要确认 API 和本机端口容量 |
-| Robot Evaluation | 未使用 | 从操作任务生成场景、规划机器人动作并验证成功条件 | 使用 `scripts/robot_eval/`；需要机器人模型、策略或配套 planner 环境 |
-| MuJoCo/USD 导出 | 未使用 | 将 DMD/SDF 场景迁移到其他仿真器 | 运行 `scripts/setup_mujoco_export.sh` 创建独立环境，再用 `scripts/export_scene_to_mujoco.py` |
-| EmbodiChain 直接运行 | 尚未接入 | 用 EmbodiChain 作为后续仿真/任务执行层 | 需要在 EmbodiChain 中实现或接通 DMD/SDFormat loader，并注册 `scene` package 路径；当前 `pip install -e .` 只表示包可导入，不等于已经替换 SceneSmith 的仿真引擎 |
-
-### 7.1 启用材质检索
+如果输出中出现 `house_layout.json`、`room_<name>/` 或 `combined_house/`，通常是漏写了：
 
 ```bash
-python scripts/download_ambientcg.py --output data/materials
-python scripts/compute_ambientcg_embeddings.py --materials-dir data/materials
+experiment=desktop_scene_generation
 ```
 
-然后修改 `.env`：
+### 找不到合格主桌面
 
-```dotenv
-SCENESMITH_USE_MATERIALS_RETRIEVAL="true"
-```
+日志出现 `No desktop support surface satisfies...` 时，通常是生成的桌面网格不够平、面积太小或被装饰结构抬高。优先重新生成更简单的平顶桌；必要时再调整 `desktop.target_surface.*` 阈值。
 
-材质检索服务器会增加本机资源占用。在基础 API 模式下，它不是场景生成的必要条件。
+### 校验报告有效，但语义或姿态仍错误
 
-### 7.2 启用 HSSD 或 Objaverse
+结构校验只保证“一张桌、一个主桌面、所有小物都登记在该桌面”。它不会证明碗确实倒扣、瓶子确实密封、堆叠接触正确或对象清单完全匹配。必须查看 Blender、多视图渲染和 `scene_state.json`。
 
-准备好 README 所述数据后，可通过 Hydra 覆盖选择资产来源。例如只让家具使用 HSSD：
+### 物体在物理阶段消失
 
-```bash
-python main.py +name=hssd_furniture \
-  furniture_agent.asset_manager.general_asset_source=hssd \
-  manipuland_agent.asset_manager.general_asset_source=generated \
-  'experiment.prompts=["A simple dining room with a table and chairs."]'
-```
+默认局部和最终仿真都会移除明显掉落的小物。对比：
 
-只让小物体使用 Objaverse：
+- `scene_states/desktop_pre_projection/`：最终投影前状态。
+- `scene_states/final_desktop_scene/`：最终物理处理后状态。
+- `scene.log` 中的 `Removed fallen desktop objects` 记录。
 
-```bash
-python main.py +name=objaverse_small_objects \
-  manipuland_agent.asset_manager.general_asset_source=objaverse \
-  'experiment.prompts=["A simple kitchen with utensils on the counter."]'
-```
+### 想只重做小物，不重新生成桌子
 
-这两个功能依赖本地资产和 CLIP 检索数据，不能只修改一个开关就直接运行。
-
-### 7.3 启用可动关节物体
-
-当前 `.env` 中的 `ARTICULATION_SERVER_BASE_URL` 只是预留变量，尚未自动替代 SceneSmith 的 ArtVIP/PartNet 检索链路。若使用仓库原生功能，应先按照 README 准备 ArtVIP 或 PartNet-Mobility 数据、SDF 和 embedding，然后设置：
-
-```dotenv
-SCENESMITH_ENABLE_ARTICULATED="true"
-```
-
-如果想直接调用云端 Articraft API，则还需要新增与现有远程几何 client 类似的 articulated adapter，仅填写 URL 不足以启用。
-
-### 7.4 Planner/Critic 的结构化输出模式
-
-当前服务的 Responses 接口会把工具调用作为普通 JSON 文本返回，而 Chat Completions 接口能够返回原生 `tool_calls`。因此当前方案使用同一个 API 和模型，只把 Agents SDK transport 配置为：
-
-```dotenv
-SCENESMITH_OPENAI_API_MODE="chat_completions"
-SCENESMITH_OPENAI_STRUCTURED_OUTPUT_MODE="json_object"
-```
-
-这没有修改或绕过原仓库的 planner/designer/critic 执行流程。若以后更换为完整支持 Responses API、原生工具调用和 JSON Schema 的服务，可以设置：
-
-```dotenv
-SCENESMITH_OPENAI_STRUCTURED_OUTPUT_MODE="json_schema"
-SCENESMITH_OPENAI_API_MODE="responses"
-```
-
-各 agent 的 critique 轮数继续使用配置文件默认值。更高的轮数通常会增加 API 调用、耗时和费用。
-
-### 7.5 MuJoCo 和 USD
-
-导出依赖与当前 `bpy` 环境存在 OpenUSD 冲突，因此必须使用单独环境：
-
-```bash
-./scripts/setup_mujoco_export.sh
-source .mujoco_venv/bin/activate
-
-python scripts/export_scene_to_mujoco.py \
-  /home/dex/桌面/scenesmith/outputs/YYYY-MM-DD/HH-MM-SS/scene_000 \
-  -o mujoco_export
-
-python -m mujoco.viewer --mjcf=mujoco_export/scene.xml
-```
-
-需要 USD 时增加 `--usd`。该导出链路目前属于实验功能，应重新检查材质、关节和碰撞几何。
-
-## 8. EmbodiChain 的衔接位置
-
-SceneSmith 负责“生成场景”，EmbodiChain 更适合放在“加载场景、加入机器人、执行任务和记录结果”的后半段。推荐边界是：
-
-```text
-SceneSmith
-  └─ scene_000/combined_house/house.dmd.yaml + SDF/GLB/纹理
-       ↓ DMD/SDFormat loader
-EmbodiChain
-  └─ 仿真世界、机器人、控制策略、任务执行和评测
-```
-
-DMD/SDFormat loader 至少需要完成：
-
-1. 解析 `house.dmd.yaml` 中的 `add_model`、`add_weld` 和自由体姿态。
-2. 将 `package://scene/...` 映射到对应 `scene_000` 目录。
-3. 加载每个 SDF 中的视觉网格、碰撞网格、惯量和关节。
-4. 保持 SceneSmith 的米制坐标、Z-up 方向和对象命名。
-5. 在手动编辑 Blender 后同步变换；Blender 文件不能代替 DMD 仿真状态。
-
-在该 loader 完成前，建议使用 Drake Model Visualizer 验证原生 DMD，用 Blender 展示外观，不要直接宣称 SceneSmith 已经换成 EmbodiChain 仿真引擎。
-
-## 9. 常见问题与检查顺序
+当前 desktop 尚未接入 `resume_from_path`，不能通过 `pipeline.start_stage` 实现。`desktop_after_table` 可用于人工调试，但还不是正式的续跑入口。
 
 ### API 调用失败
 
-1. 检查三个 `/health`。
-2. 查看 `experiment.log` 中的 HTTP 状态码和重试信息。
+1. 检查三个健康端点。
+2. 查看 `experiment.log` 和 `scene_000/scene.log` 中的 HTTP 状态码与重试记录。
 3. 检查 `.env` 的 endpoint path 是否与服务端一致。
-4. 几何生成可耗时数分钟，不要把 timeout 设得过短。
-
-### LLM 重复调用但没有进展
-
-确认正在使用：
-
-```dotenv
-SCENESMITH_OPENAI_STRUCTURED_OUTPUT_MODE="json_object"
-```
-
-如果 provider 仍不能完成 planner 或 critic 的结构化响应，应修复 provider 兼容性或更换服务，不应依赖 `max_critique_rounds=0` 绕过原 agent 工作流。
-
-### 物体朝向或支撑错误
-
-- 查看最终 Blender，而不是只看日志中的对象名称。
-- 查看 DMD 中的旋转与相对 weld 变换。
-- 对“倒扣、侧放、打开、贴墙”等要求做显式姿态验证。
-- 手动改 Blender 只改变视觉结果；要进入仿真，还必须同步 DMD/JSON 和碰撞状态。
+4. 几何生成超时应结合服务健康状况判断，不要把 timeout 设得过短。
 
 ### 输出占用过大
 
-确认最终结果不再需要中间调试文件后，可先查看清理脚本帮助：
+生成资产的碰撞网格和调试图可能较大。确认不再需要中间文件后，先查看清理脚本说明：
 
 ```bash
 python scripts/clean_scene_output.py --help
 ```
 
-清理前应备份 `combined_house/`、`resolved_config.yaml` 和 `experiment.log`。不要在仍需断点续跑时删除中间状态。
-
-## 10. 推荐的日常流程
-
-1. 激活 `scenesmith` 环境并检查三个远程服务。
-2. 先用 `room`、单 worker 和简短提示词做小规模验证。
-3. 提示词明确列出对象、顺序、支撑、朝向和禁止项。
-4. 记录终端打印的输出目录，或使用 `outputs/latest-run`。
-5. 先看最终 Blender 外观，再用 Drake/Meshcat 检查 DMD 和碰撞结构。
-6. 如果只修改桌面小物，使用 `resume_from_path` 从 `manipuland` 阶段分支。
-7. 不要把手工修改后的 Blender 与未同步的 DMD 混作同一个仿真结果。
-8. 保留默认 Critic 流程；确认基础链路稳定后，再逐项开启材质、关节资产、并行或其他仿真器导出。
+清理前应保留最终 `scene_state.json`、DMD、Blender 及其引用的 SDF/网格/纹理；只复制 `.blend` 或 `.dmd.yaml` 不一定得到可迁移的完整场景。
