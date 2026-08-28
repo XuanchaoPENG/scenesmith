@@ -1,0 +1,59 @@
+defaults:
+  - base_experiment
+
+prompts:
+  - >-
+    Create a focused tabletop still life containing a glass cola bottle standing
+    on a closed hardcover book, with the book balanced on an upside-down white
+    ceramic bowl resting inside a white dinner plate. Preserve the vertical stack,
+    object orientations, relative scale, and sparse neutral presentation.
+
+num_workers: 1
+
+# The inherited indoor pipeline keys remain present for compatibility with shared
+# launch/reporting code, but desktop generation executes its own two-stage pipeline.
+pipeline:
+  start_stage: "desktop_table"
+  stop_stage: "desktop_objects"
+  resume_from_path: null
+  parallel_rooms: false
+  max_parallel_rooms: 1
+
+sceneeval_export:
+  enabled: false
+  asset_id_prefix: "scenesmith_desktop"
+
+desktop:
+  studio:
+    width_m: 4.0
+    length_m: 4.0
+    floor_thickness_m: 0.1
+
+  table:
+    description: >-
+      A simple high-quality rectangular freestanding table with a broad flat top,
+      four sturdy legs, neutral light wood finish, no drawers, no shelves, no objects
+    default_dimensions_m: [1.4, 0.8, 0.75]
+
+  prompt_analysis:
+    max_retries: 3
+
+  target_surface:
+    policy: "largest_top_horizontal"
+    min_area_m2: 0.25
+    max_tilt_degrees: 5.0
+    top_height_tolerance_m: 0.05
+
+  objects:
+    # Preserve exact reference-image counts. This prevents the general router from
+    # splitting one semantic object (for example a filled bottle) into two assets.
+    atomic_asset_requests: true
+    allow_optional_objects: true
+    max_count: 15
+    open_area_ratio: 0.4
+    allow_floor_placement: false
+
+  validation:
+    reject_extra_furniture: true
+    reject_off_surface_objects: true
+    run_physics_simulation: true

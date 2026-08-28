@@ -1,11 +1,15 @@
 from omegaconf import DictConfig
 
 from .base_experiment import BaseExperiment
+from .desktop_scene_generation import DesktopSceneGenerationExperiment
 from .indoor_scene_generation import IndoorSceneGenerationExperiment
 
 # Each key has to be a yaml file under '[project_root]/configurations/experiment'
 # without .yaml suffix.
-exp_registry = dict(indoor_scene_generation=IndoorSceneGenerationExperiment)
+exp_registry = dict(
+    indoor_scene_generation=IndoorSceneGenerationExperiment,
+    desktop_scene_generation=DesktopSceneGenerationExperiment,
+)
 
 
 def build_experiment(cfg: DictConfig) -> BaseExperiment:

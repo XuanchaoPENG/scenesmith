@@ -125,6 +125,14 @@ class ManipulandAgentPrompts(PromptEnum):
     SELECT_CONTEXT_FURNITURE = "select_context_furniture"
 
 
+class DesktopAgentPrompts(PromptEnum):
+    """Registry of desktop-only scene prompts."""
+
+    _BASE_PATH = nonmember("desktop_agent")
+
+    ANALYZE_DESKTOP_PROMPT = "analyze_desktop_prompt"
+
+
 class WallAgentPrompts(PromptEnum):
     """Registry of wall agent prompts."""
 

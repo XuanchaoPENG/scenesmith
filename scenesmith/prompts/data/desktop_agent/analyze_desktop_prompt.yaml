@@ -1,0 +1,45 @@
+name: "analyze_desktop_prompt"
+version: "1.0"
+description: "Parse a desktop-only scene request into a table and tabletop objects"
+template_variables:
+  - scene_description
+  - default_table_description
+  - default_table_dimensions
+
+prompt: |
+  Parse the following desktop-scene request into one table specification and the
+  objects that must be placed on its main top surface.
+
+  Scene request (including any reference-image constraints):
+  {{ scene_description }}
+
+  Hard scope rules:
+  - The generated scene contains exactly ONE table/desk and its tabletop objects.
+  - Do not request chairs, walls, room decor, floor objects, or extra furniture.
+  - Treat visible plates, bowls, books, bottles, devices, stationery, and similar
+    items as tabletop objects, never as furniture.
+  - Preserve explicit counts, relative placement, orientation, containment, and
+    stacking relationships from the request/reference.
+  - A sealed container and its visible contents are one required object. Describe
+    the contents as an appearance attribute; never list them separately.
+  - Treat a background cloth that merely covers the whole support surface as part
+    of the tabletop appearance, unless a removable cloth is explicitly requested.
+  - If the request does not describe a table, use the default neutral table below.
+
+  Default table: {{ default_table_description }}
+  Default dimensions [width, depth, height] meters: {{ default_table_dimensions }}
+
+  Return exactly this JSON shape:
+  {
+    "table_description": "standalone visual description of only the table",
+    "table_short_name": "filesystem_safe_name",
+    "table_dimensions_m": [1.4, 0.8, 0.75],
+    "required_items": ["specific tabletop object or grouped quantity"],
+    "optional_items": ["at most two contextually useful items"],
+    "style_notes": "visual style and density",
+    "layout_notes": "precise spatial, orientation, and stacking relationships"
+  }
+
+  Use concise standalone object descriptions. Every reference-visible tabletop
+  object belongs in required_items. Do not invent optional objects for a tightly
+  constrained reference image.
