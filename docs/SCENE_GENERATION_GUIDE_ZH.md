@@ -194,7 +194,7 @@ CSV 会覆盖 YAML 中的 `prompts`，目录编号沿用 `scene_index`，例如�
 
 1. 只选择带 `desktop_target` 标记的桌子；数量不是 1 会报错。
 2. 从桌子网格提取全部支撑面。
-3. 过滤面积小于 `0.25 m²` 或倾角大于 `5°` 的表面。
+3. 过滤倾角大于 `5°` 的表面；Desktop 主桌面选择阶段不再额外设置最小面积限制。
 4. 在最高表面向下 `0.05 m` 的候选带内选择面积最大的表面，并锁定为唯一主桌面。
 5. 关闭上下文家具选择，不暴露地面、架子、抽屉或次级表面。
 6. Planner 调度 Designer 生成/排列/堆叠物体；Critic 通过多视图和状态工具检查结果并给出迭代意见。
@@ -229,7 +229,6 @@ CSV 会覆盖 YAML 中的 `prompts`，目录编号沿用 `scene_index`，例如�
 | `desktop.studio.floor_thickness_m` | `0.1` | 隐藏支撑地面厚度 |
 | `desktop.table.default_dimensions_m` | `[1.4, 0.8, 0.75]` | prompt 未给尺寸时的桌子尺寸 |
 | `desktop.prompt_analysis.max_retries` | `3` | prompt 结构化解析重试次数 |
-| `desktop.target_surface.min_area_m2` | `0.25` | 主桌面最小面积 |
 | `desktop.target_surface.max_tilt_degrees` | `5.0` | 主桌面最大倾角 |
 | `desktop.target_surface.top_height_tolerance_m` | `0.05` | 最高候选带厚度 |
 | `desktop.objects.atomic_asset_requests` | `true` | 禁用小物复合拆分路由器 |

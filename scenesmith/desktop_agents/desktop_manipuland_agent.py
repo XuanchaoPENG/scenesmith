@@ -69,7 +69,6 @@ class DesktopManipulandAgent(StatefulManipulandAgent):
         cfg = self.cfg.desktop.target_surface
         primary = select_primary_desktop_surface(
             table.support_surfaces,
-            min_area_m2=float(cfg.min_area_m2),
             max_tilt_degrees=float(cfg.max_tilt_degrees),
             top_height_tolerance_m=float(cfg.top_height_tolerance_m),
         )

@@ -40,7 +40,6 @@ desktop:
 
   target_surface:
     policy: "largest_top_horizontal"
-    min_area_m2: 0.25
     max_tilt_degrees: 5.0
     top_height_tolerance_m: 0.05
 

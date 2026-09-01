@@ -51,19 +51,25 @@ def test_primary_desktop_surface_prefers_largest_surface_in_top_band() -> None:
 
     selected = select_primary_desktop_surface(
         [lower_large, tabletop, raised_detail],
-        min_area_m2=0.25,
         top_height_tolerance_m=0.05,
     )
 
     assert selected.surface_id == "tabletop"
 
 
-def test_primary_desktop_surface_rejects_tilted_or_tiny_surfaces() -> None:
+def test_primary_desktop_surface_rejects_tilted_surface() -> None:
     tilted = _surface("tilted", area_dims=(1.4, 0.8), z=0.75, tilt_degrees=15)
-    tiny = _surface("tiny", area_dims=(0.2, 0.2), z=0.8)
 
     with pytest.raises(ValueError, match="No desktop support surface"):
-        select_primary_desktop_surface([tilted, tiny], min_area_m2=0.25)
+        select_primary_desktop_surface([tilted])
+
+
+def test_primary_desktop_surface_accepts_small_horizontal_surface() -> None:
+    tiny = _surface("tiny", area_dims=(0.1, 0.1), z=0.8)
+
+    selected = select_primary_desktop_surface([tiny])
+
+    assert selected.surface_id == "tiny"
 
 
 def test_minimal_desktop_studio_has_floor_but_no_walls(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ from scenesmith.agent_utils.room import SupportSurface
 def select_primary_desktop_surface(
     surfaces: list[SupportSurface],
     *,
-    min_area_m2: float = 0.25,
     max_tilt_degrees: float = 5.0,
     top_height_tolerance_m: float = 0.05,
 ) -> SupportSurface:
@@ -21,14 +20,13 @@ def select_primary_desktop_surface(
     candidates: list[SupportSurface] = []
     for surface in surfaces:
         normal_z = float(surface.transform.rotation().matrix()[2, 2])
-        if normal_z >= min_normal_z and surface.area >= min_area_m2:
+        if normal_z >= min_normal_z:
             candidates.append(surface)
 
     if not candidates:
         raise ValueError(
-            "No desktop support surface satisfies the configured area and tilt "
-            f"constraints (min_area_m2={min_area_m2}, "
-            f"max_tilt_degrees={max_tilt_degrees})"
+            "No desktop support surface satisfies the configured tilt constraint "
+            f"(max_tilt_degrees={max_tilt_degrees})"
         )
 
     highest_z = max(float(s.transform.translation()[2]) for s in candidates)
